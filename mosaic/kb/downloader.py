@@ -19,7 +19,7 @@ def download_video(url: str, output_dir: Path, cookies_file: Path | None = None)
     ensure_dir(output_dir)
 
     ydl_opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "format": "bestvideo+bestaudio/best",
         "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
