@@ -6,8 +6,12 @@ import subprocess
 
 @pytest.fixture
 def tmp_dir():
-    with tempfile.TemporaryDirectory() as d:
+    d = tempfile.mkdtemp()
+    try:
         yield Path(d)
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
