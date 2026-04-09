@@ -61,6 +61,12 @@ def main():
         logger.info("--seed-only flag set. Done.")
         return
 
+    cookies_file = Path("cookies.txt") if Path("cookies.txt").exists() else None
+    if cookies_file:
+        logger.info("Using cookies.txt for authenticated downloads.")
+    else:
+        logger.warning("No cookies.txt found — downloads may fail with HTTP 403.")
+
     builder = KBBuilder(
         store=store,
         clips_dir=settings.clips_dir,
@@ -68,6 +74,7 @@ def main():
         api_key=api_key,
         whisper_model=settings.whisper_model,
         frame_interval=settings.frame_interval_seconds,
+        cookies_file=cookies_file,
     )
 
     channels_to_process = (

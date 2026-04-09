@@ -18,6 +18,7 @@ class KBBuilder:
         api_key: str,
         whisper_model: str = "base",
         frame_interval: int = 8,
+        cookies_file: Path | None = None,
     ):
         self.store = store
         self.clips_dir = clips_dir
@@ -25,6 +26,7 @@ class KBBuilder:
         self.api_key = api_key
         self.whisper_model = whisper_model
         self.frame_interval = frame_interval
+        self.cookies_file = cookies_file
 
     def process_video(self, url: str, channel_key: str) -> None:
         """Download, extract, transcribe, analyze, and store one video."""
@@ -32,7 +34,7 @@ class KBBuilder:
         channel_focus = channel_config.get("focus", "")
 
         logger.info(f"Downloading: {url}")
-        meta = download_video(url, self.clips_dir / channel_key)
+        meta = download_video(url, self.clips_dir / channel_key, self.cookies_file)
 
         if self.store.is_processed(meta.video_id):
             logger.info(f"Skipping {meta.video_id} — already in KB")
