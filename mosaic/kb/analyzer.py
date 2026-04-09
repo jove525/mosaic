@@ -109,19 +109,31 @@ def analyze_video(
     text_block = {"type": "text", "text": _build_prompt(meta, transcript, channel_focus)}
     content = image_blocks + [text_block]
 
-    response = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": content}],
-    )
+    data = None
+    for attempt in range(2):
+        response = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=8096,
+            messages=[{"role": "user", "content": content}],
+        )
+        raw = response.content[0].text
+        # Strip markdown code fences if present
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        # Find JSON object boundaries
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start != -1 and end > start:
+            raw = raw[start:end]
+        try:
+            data = json.loads(raw.strip())
+            break
+        except json.JSONDecodeError:
+            if attempt == 1:
+                raise
 
-    raw = response.content[0].text
-    # Strip markdown code fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw.strip())
 
     return VideoInsights(
         video_id=meta.video_id,
