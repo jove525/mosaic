@@ -1,4 +1,5 @@
 import subprocess
+import whisper
 from dataclasses import dataclass, field
 from pathlib import Path
 from mosaic.utils.fs import ensure_dir
@@ -31,3 +32,24 @@ def extract_frames(video_path: Path, frame_dir: Path, interval_seconds: int = 8)
 
     frame_paths = sorted(video_frame_dir.glob("frame_*.png"))
     return FrameSet(video_path=video_path, frame_dir=video_frame_dir, frame_paths=frame_paths)
+
+
+@dataclass
+class TranscriptSegment:
+    start: float
+    end: float
+    text: str
+
+
+def transcribe_video(video_path: Path, model_name: str = "base") -> list[TranscriptSegment]:
+    """Transcribe audio from video. Returns timestamped segments."""
+    model = whisper.load_model(model_name)
+    result = model.transcribe(str(video_path), fp16=False)
+    return [
+        TranscriptSegment(
+            start=seg["start"],
+            end=seg["end"],
+            text=seg["text"].strip(),
+        )
+        for seg in result["segments"]
+    ]
