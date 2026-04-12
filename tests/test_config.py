@@ -1,5 +1,5 @@
-from mosaic.config.settings import Settings
-from mosaic.config.channels import REFERENCE_CHANNELS, CHANNEL_PROFILES
+from mosaic.config.settings import Settings, settings
+from mosaic.config.channels import REFERENCE_CHANNELS, CHANNEL_PROFILES, PRODUCTION_CHANNELS
 
 
 def test_settings_has_required_fields():
@@ -25,3 +25,33 @@ def test_channel_profiles_has_predictive_echoes_and_incentives_lab():
     required_keys = {"domain", "tone", "arc_template", "visual_style", "north_star", "reference_channels"}
     for profile in CHANNEL_PROFILES.values():
         assert required_keys.issubset(profile.keys())
+
+
+def test_settings_has_output_dir():
+    s = Settings()
+    assert s.output_dir.name == "output"
+
+
+def test_settings_has_elevenlabs_keys():
+    s = Settings()
+    assert isinstance(s.elevenlabs_api_key, str)
+    assert isinstance(s.elevenlabs_voice_id, str)
+
+
+def test_settings_has_taste_dir():
+    s = Settings()
+    assert s.taste_dir.name == "taste"
+    assert s.taste_dir.parent.name == "data"
+
+
+def test_production_channels_has_incentiveslab():
+    required_keys = {
+        "name", "handle", "domain", "tone", "arc_template",
+        "visual_style", "north_star", "channel_north_star",
+        "reference_channels", "avg_length_min", "core_thesis",
+    }
+    assert "incentiveslab" in PRODUCTION_CHANNELS
+    profile = PRODUCTION_CHANNELS["incentiveslab"]
+    assert required_keys.issubset(profile.keys())
+    assert profile["handle"].startswith("@")
+    assert isinstance(profile["reference_channels"], list)

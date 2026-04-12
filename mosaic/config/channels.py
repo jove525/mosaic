@@ -157,6 +157,22 @@ CHANNEL_PROFILES: dict = {
         "visual_style": "human-focused, institutional, everyday scenes",
         "north_star": "make the viewer distrust something they trusted before",
         "reference_channels": ["johnny_harris", "kurzgesagt"],
-        "avg_length_min": 12,
+        "avg_length_min": 10,  # canonical: 10 min target (matches PRODUCTION_CHANNELS)
     },
+}
+
+PRODUCTION_CHANNELS: dict = {
+    "incentiveslab": {
+        "name": "IncentivesLab",
+        "handle": "@IncentivesLab",
+        "domain": "economics, human behavior, incentive structures, mental models",
+        "tone": "curious, slightly provocative, Munger-esque, educational",
+        "arc_template": "surface_reality → hidden_incentive → reframe",
+        "visual_style": "real footage, human-focused, institutional, everyday scenes",
+        "north_star": "make the viewer distrust something they trusted before",
+        "channel_north_star": "Create a video so compelling that a viewer who stumbled on it accidentally can't stop watching — and shares it before it ends.",
+        "reference_channels": ["johnny_harris", "kurzgesagt"],
+        "avg_length_min": 10,
+        "core_thesis": "Show me the incentive and I'll show you the outcome",
+    }
 }
