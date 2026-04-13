@@ -161,8 +161,15 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
                   clip_manifest: list[dict], ass_path: Path,
                   whisper_result: dict) -> Path:
     """Render final_draft.mp4 via ffmpeg. Audio is master timeline."""
+    import shutil
     output_path = topic_dir / "final_draft.mp4"
     clips_dir = topic_dir / "clips"
+    # ffmpeg ass filter cannot handle Windows absolute paths with drive letters.
+    # Copy subtitles.ass into the topic_dir and reference it with a relative path
+    # by running ffmpeg with cwd=topic_dir.
+    _local_ass = topic_dir / "subtitles_render.ass"
+    shutil.copy2(ass_path, _local_ass)
+    ass_path_str = "subtitles_render.ass"
 
     segments = whisper_result.get("segments", [])
     if segments:
@@ -184,12 +191,12 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
             "ffmpeg", "-y",
             "-f", "lavfi", "-i", f"color=c=black:size=1920x1080:duration={total_duration}",
             "-i", str(narration_path),
-            "-vf", f"ass={ass_path}",
+            "-vf", f"ass={ass_path_str}",
             "-c:v", "libx264", "-c:a", "aac", "-shortest",
             str(output_path),
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, cwd=str(topic_dir))
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
             logger.error("ffmpeg failed (no-clips branch): %s", stderr)
@@ -242,7 +249,7 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
             "-i", str(music_path),
             "-filter_complex", audio_filter,
             "-map", "0:v", "-map", "[aout]",
-            "-vf", f"ass={ass_path}",
+            "-vf", f"ass={ass_path_str}",
             "-c:v", "libx264", "-c:a", "aac", "-shortest",
             str(output_path),
         ]
@@ -252,13 +259,13 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
             "-i", str(visual_path),
             "-i", str(narration_path),
             "-map", "0:v", "-map", "1:a",
-            "-vf", f"ass={ass_path}",
+            "-vf", f"ass={ass_path_str}",
             "-c:v", "libx264", "-c:a", "aac", "-shortest",
             str(output_path),
         ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, cwd=str(topic_dir))
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
         logger.error("ffmpeg failed (final render): %s", stderr)

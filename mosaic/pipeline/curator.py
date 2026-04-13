@@ -115,9 +115,43 @@ def _generate_narration(narration_lines: list[dict]) -> bytes:
         "model_id": "eleven_monolingual_v1",
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp = requests.post(url, headers=headers, json=payload, timeout=300)
     resp.raise_for_status()
     return resp.content
+
+
+def _generate_search_queries(visual_description: str, narration_text: str) -> list[str]:
+    """Ask Claude to convert a [VISUAL] description into short archival search queries."""
+    client = anthropic.Anthropic()
+    prompt = (
+        f"You are helping source archival footage for a documentary video.\n\n"
+        f"Narration: \"{narration_text}\"\n"
+        f"Visual description: \"{visual_description}\"\n\n"
+        f"Generate 3 short search queries (3-5 words each) suitable for searching "
+        f"Internet Archive or Wikimedia Commons for real archival footage that would "
+        f"match this moment. Prioritize historically specific terms (e.g. 'WWII war bond drive 1943', "
+        f"'Norman Rockwell war poster', 'FDR cabinet meeting'). "
+        f"Return ONLY a JSON array of 3 strings, nothing else."
+    )
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=128,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        match = re.search(r"\[.*?\]", text, re.DOTALL)
+        if match:
+            try:
+                queries = json.loads(match.group())
+                return [q for q in queries if isinstance(q, str)][:3]
+            except json.JSONDecodeError:
+                pass
+    except Exception as e:
+        logger.warning("Query generation failed: %s", e)
+    # Fallback: extract key nouns from visual description
+    words = visual_description.split()[:6]
+    return [" ".join(words)]
 
 
 def _search_internet_archive(query: str, max_results: int = 5) -> list[dict]:
@@ -137,8 +171,10 @@ def _search_internet_archive(query: str, max_results: int = 5) -> list[dict]:
         for doc in docs:
             identifier = doc.get("identifier", "")
             if identifier:
+                # Try to find a real downloadable video file via metadata
                 results.append({
-                    "url": f"https://archive.org/download/{identifier}/{identifier}.mp4",
+                    "identifier": identifier,
+                    "url": None,  # resolved in _resolve_ia_download_url
                     "duration": 10.0,
                     "title": doc.get("title", ""),
                     "source_type": "internet_archive",
@@ -148,6 +184,65 @@ def _search_internet_archive(query: str, max_results: int = 5) -> list[dict]:
         return results
     except Exception as e:
         logger.warning("Internet Archive search failed for '%s': %s", query, e)
+        return []
+
+
+def _resolve_ia_download_url(identifier: str) -> Optional[str]:
+    """Fetch IA item metadata and return the first downloadable mp4 URL."""
+    try:
+        meta_url = f"https://archive.org/metadata/{identifier}"
+        resp = requests.get(meta_url, timeout=15)
+        resp.raise_for_status()
+        files = resp.json().get("files", [])
+        for f in files:
+            name = f.get("name", "")
+            if name.lower().endswith(".mp4"):
+                return f"https://archive.org/download/{identifier}/{name}"
+        # fallback: try .ogv or .mpeg
+        for f in files:
+            name = f.get("name", "")
+            if name.lower().endswith((".ogv", ".mpeg", ".mov")):
+                return f"https://archive.org/download/{identifier}/{name}"
+    except Exception as e:
+        logger.warning("IA metadata fetch failed for '%s': %s", identifier, e)
+    return None
+
+
+def _search_wikimedia(query: str, max_results: int = 5) -> list[dict]:
+    """Search Wikimedia Commons for CC-licensed video clips."""
+    url = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": f"{query} filetype:video",
+        "srnamespace": "6",  # File namespace
+        "srlimit": max_results,
+        "format": "json",
+    }
+    headers = {"User-Agent": "MosaicPipeline/1.0 (documentary video tool; contact@example.com)"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        items = resp.json().get("query", {}).get("search", [])
+        results = []
+        for item in items:
+            title = item.get("title", "")
+            if not title.startswith("File:"):
+                continue
+            filename = title[len("File:"):]
+            # Build direct Commons file URL
+            file_url = f"https://commons.wikimedia.org/wiki/Special:FilePath/{requests.utils.quote(filename)}"
+            results.append({
+                "url": file_url,
+                "duration": 10.0,
+                "title": filename,
+                "source_type": "wikimedia_commons",
+                "license": "cc_licensed",
+                "license_tier": "SAFE",
+            })
+        return results
+    except Exception as e:
+        logger.warning("Wikimedia search failed for '%s': %s", query, e)
         return []
 
 
@@ -197,9 +292,12 @@ def _call_claude_for_matching(narration_line: dict, clip_url: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
+        match = re.search(r"\{.*?\}", text, re.DOTALL)
         if match:
-            return json.loads(match.group())
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
         return {"semantic": False, "emotional": False, "narrative": False, "why": "parse error"}
 
 
@@ -225,11 +323,55 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
         clip_filename = f"clip_{line_ref:03d}.mp4"
         clip_dest = clips_dir / clip_filename
 
-        candidates = _search_internet_archive(line["visual"], max_results=5)
+        # Skip if already downloaded from a previous run
+        if clip_dest.exists() and clip_dest.stat().st_size > 10_000:
+            logger.info("Curator: clip_%03d already exists — skipping", line_ref)
+            sourced += 1
+            manifest.append({
+                "narration_line_ref": line_ref,
+                "narration_text": line["narration_text"],
+                "source_url": "cached",
+                "local_path": f"clips/{clip_filename}",
+                "source_type": "cached",
+                "license": "cached",
+                "license_tier": "SAFE",
+                "semantic_match": True,
+                "emotional_match": True,
+                "narrative_match": True,
+                "duration_seconds": 10.0,
+                "why_selected": "Previously downloaded clip reused",
+            })
+            continue
+
+        # Generate targeted search queries from the visual description
+        try:
+            queries = _generate_search_queries(line["visual"], line["narration_text"])
+        except Exception as e:
+            logger.warning("Curator: query generation error line %d: %s", line_ref, e)
+            queries = [line["visual"].split()[:5]]
+            queries = [" ".join(queries[0])]
+        if not queries:
+            queries = ["WWII archival footage"]
+        logger.info("Curator: line %d queries: %s", line_ref, queries)
+
+        # Gather candidates from Internet Archive + Wikimedia Commons
+        candidates = []
+        for query in queries:
+            ia_results = _search_internet_archive(query, max_results=3)
+            # Resolve actual download URLs for IA results
+            for r in ia_results:
+                if r.get("identifier"):
+                    url = _resolve_ia_download_url(r["identifier"])
+                    if url:
+                        r["url"] = url
+                        candidates.append(r)
+            wm_results = _search_wikimedia(query, max_results=3)
+            candidates.extend(wm_results)
+
         selected = None
 
         for candidate in candidates:
-            if candidate["license_tier"] != "SAFE":
+            if candidate["license_tier"] != "SAFE" or not candidate.get("url"):
                 continue
             match = _call_claude_for_matching(line, candidate["url"])
             score = score_clip_match(
@@ -279,6 +421,11 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
             manifest.append(selected)
 
     manifest_path = topic_dir / "clip_manifest.json"
+    # Sanitize manifest entries to ensure JSON-serializable values
+    for entry in manifest:
+        for k, v in entry.items():
+            if not isinstance(v, (str, int, float, bool, type(None))):
+                entry[k] = str(v)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     logger.info("Curator: generating narration via ElevenLabs")
