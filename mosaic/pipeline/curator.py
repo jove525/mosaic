@@ -302,7 +302,7 @@ def _call_claude_for_matching(narration_line: dict, clip_url: str) -> dict:
 
 
 def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
-    """Run Curator agent. Reads script.md, writes clip_manifest.json, narration.mp3, music.mp3."""
+    """Run Curator agent. Reads script.md, writes raw_candidates.json, narration.mp3, music.mp3."""
     taste_store = TasteStore(settings.taste_dir)
     taste_learnings = taste_store.query("curator clip selection footage", n_results=3)
     if taste_learnings:
@@ -311,122 +311,85 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
     script_path = topic_dir / "script.md"
     script_text = script_path.read_text(encoding="utf-8")
     narration_lines = parse_narration_lines(script_text)
-    clips_dir = topic_dir / "clips"
-    clips_dir.mkdir(exist_ok=True)
+    clips_dir = topic_dir / "clips" / "raw"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    (topic_dir / "clips" / "final").mkdir(parents=True, exist_ok=True)
 
-    manifest: list[dict] = []
-    gaps = 0
-    sourced = 0
+    raw_candidates: list[dict] = []
 
     for line in narration_lines:
         line_ref = line["line_ref"]
-        clip_filename = f"clip_{line_ref:03d}.mp4"
-        clip_dest = clips_dir / clip_filename
-
-        # Skip if already downloaded from a previous run
-        if clip_dest.exists() and clip_dest.stat().st_size > 10_000:
-            logger.info("Curator: clip_%03d already exists — skipping", line_ref)
-            sourced += 1
-            manifest.append({
-                "narration_line_ref": line_ref,
-                "narration_text": line["narration_text"],
-                "source_url": "cached",
-                "local_path": f"clips/{clip_filename}",
-                "source_type": "cached",
-                "license": "cached",
-                "license_tier": "SAFE",
-                "semantic_match": True,
-                "emotional_match": True,
-                "narrative_match": True,
-                "duration_seconds": 10.0,
-                "why_selected": "Previously downloaded clip reused",
-            })
-            continue
-
-        # Generate targeted search queries from the visual description
+        queries = []
         try:
             queries = _generate_search_queries(line["visual"], line["narration_text"])
         except Exception as e:
             logger.warning("Curator: query generation error line %d: %s", line_ref, e)
-            queries = [line["visual"].split()[:5]]
-            queries = [" ".join(queries[0])]
         if not queries:
             queries = ["WWII archival footage"]
         logger.info("Curator: line %d queries: %s", line_ref, queries)
 
-        # Gather candidates from Internet Archive + Wikimedia Commons
         candidates = []
         for query in queries:
-            ia_results = _search_internet_archive(query, max_results=3)
-            # Resolve actual download URLs for IA results
+            # Prelinger Archives first
+            prelinger_results = _search_internet_archive(
+                f"collection:prelinger {query}", max_results=2
+            )
+            for r in prelinger_results:
+                if r.get("identifier"):
+                    url = _resolve_ia_download_url(r["identifier"])
+                    if url:
+                        r["url"] = url
+                        r["source"] = "prelinger"
+                        candidates.append(r)
+
+            # General Internet Archive
+            ia_results = _search_internet_archive(query, max_results=2)
             for r in ia_results:
                 if r.get("identifier"):
                     url = _resolve_ia_download_url(r["identifier"])
                     if url:
                         r["url"] = url
                         candidates.append(r)
-            wm_results = _search_wikimedia(query, max_results=3)
+
+            # Wikimedia Commons
+            wm_results = _search_wikimedia(query, max_results=2)
             candidates.extend(wm_results)
 
-        selected = None
-
+        # Download all unique candidates for this line
+        downloaded_candidates = []
+        seen_identifiers = set()
         for candidate in candidates:
-            if candidate["license_tier"] != "SAFE" or not candidate.get("url"):
+            identifier = candidate.get("identifier") or candidate.get("title", "unknown")
+            if identifier in seen_identifiers:
                 continue
-            match = _call_claude_for_matching(line, candidate["url"])
-            score = score_clip_match(
-                semantic=match.get("semantic", False),
-                emotional=match.get("emotional", False),
-                narrative=match.get("narrative", False),
-            )
-            if score >= 2:
-                downloaded = _download_clip(candidate["url"], clip_dest)
-                if downloaded:
-                    selected = {
-                        "narration_line_ref": line_ref,
-                        "narration_text": line["narration_text"],
-                        "source_url": candidate["url"],
-                        "local_path": f"clips/{clip_filename}",
-                        "source_type": candidate["source_type"],
-                        "license": candidate["license"],
-                        "license_tier": candidate["license_tier"],
-                        "semantic_match": match.get("semantic", False),
-                        "emotional_match": match.get("emotional", False),
-                        "narrative_match": match.get("narrative", False),
-                        "duration_seconds": candidate.get("duration", 10.0),
-                        "why_selected": match.get("why", ""),
-                    }
-                    sourced += 1
-                    break
-            time.sleep(0.5)
-
-        if selected is None:
-            gaps += 1
-            logger.warning("Curator: no SAFE clip found for line %d — logging gap", line_ref)
-            manifest.append({
-                "narration_line_ref": line_ref,
-                "narration_text": line["narration_text"],
-                "source_url": None,
-                "local_path": None,
-                "source_type": "gap",
-                "license": None,
-                "license_tier": "GAP",
-                "semantic_match": False,
-                "emotional_match": False,
-                "narrative_match": False,
-                "duration_seconds": 3.0,
-                "why_selected": "No SAFE clip found — Assembler will insert 3s black frame",
+            seen_identifiers.add(identifier)
+            safe_name = re.sub(r"[^\w\-]", "_", identifier)[:80]
+            dest = clips_dir / f"{safe_name}.mp4"
+            if dest.exists() and dest.stat().st_size > 10_000:
+                logger.info("Curator: %s already cached", safe_name)
+            else:
+                downloaded = _download_clip(candidate["url"], dest)
+                if not downloaded:
+                    continue
+            downloaded_candidates.append({
+                "identifier": identifier,
+                "source": candidate.get("source", candidate.get("source_type", "unknown")),
+                "url": candidate.get("url", ""),
+                "local_path": f"clips/raw/{dest.name}",
+                "title": candidate.get("title", ""),
+                "license": candidate.get("license", "public_domain"),
             })
-        else:
-            manifest.append(selected)
 
-    manifest_path = topic_dir / "clip_manifest.json"
-    # Sanitize manifest entries to ensure JSON-serializable values
-    for entry in manifest:
-        for k, v in entry.items():
-            if not isinstance(v, (str, int, float, bool, type(None))):
-                entry[k] = str(v)
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        raw_candidates.append({
+            "narration_line_ref": line_ref,
+            "narration_text": line["narration_text"],
+            "emotion": line.get("emotion", ""),
+            "visual_description": line.get("visual", ""),
+            "candidates": downloaded_candidates,
+        })
+
+    raw_candidates_path = topic_dir / "raw_candidates.json"
+    raw_candidates_path.write_text(json.dumps(raw_candidates, indent=2), encoding="utf-8")
 
     logger.info("Curator: generating narration via ElevenLabs")
     narration_bytes = _generate_narration(narration_lines)
@@ -450,9 +413,8 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
     narration_duration = f"{minutes}:{seconds:02d}"
 
     return {
-        "clips_sourced": sourced,
-        "clips_total": len(narration_lines),
-        "gaps": gaps,
+        "candidates_total": len(raw_candidates),
+        "candidates_with_downloads": sum(1 for r in raw_candidates if r["candidates"]),
         "narration_duration": narration_duration,
         "music_track": track["track"],
     }
