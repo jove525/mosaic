@@ -6,13 +6,14 @@ from mosaic.config.channels import PRODUCTION_CHANNELS
 
 logger = logging.getLogger(__name__)
 
-AGENT_ORDER = ["researcher", "scriptwriter", "curator", "assembler", "publisher"]
+AGENT_ORDER = ["researcher", "scriptwriter", "curator", "editorial", "assembler", "publisher"]
 
 # Required input files each agent needs before it can run
 AGENT_REQUIRED_INPUTS: dict[str, list[str]] = {
     "researcher": [],
     "scriptwriter": ["brief.md"],
     "curator": ["script.md"],
+    "editorial": ["raw_candidates.json"],
     "assembler": ["clip_manifest.json", "narration.mp3"],
     "publisher": ["final_draft.mp4", "review_notes.md"],
 }
@@ -63,6 +64,11 @@ class Orchestrator:
         result = run_scriptwriter(self.topic_dir, self._channel_profile)
         self._log("SCRIPTWRITER", f"script.md written ({result.get('line_count', '?')} lines, ~{result.get('est_minutes', '?')}min estimated)")
 
+    def _run_editorial(self):
+        from mosaic.pipeline.editorial import run_editorial
+        result = run_editorial(self.topic_dir)
+        self._log("EDITORIAL", f"clip_manifest.json written ({result.get('lines_resolved', 0)} resolved, {result.get('lines_flagged', 0)} flagged, {result.get('cuts_total', 0)} cuts, {result.get('cache_hits', 0)} cache hits)")
+
     def _run_curator(self):
         from mosaic.pipeline.curator import run_curator
         result = run_curator(self.topic_dir, self._channel_profile)
@@ -95,6 +101,7 @@ class Orchestrator:
             "researcher": self._run_researcher,
             "scriptwriter": self._run_scriptwriter,
             "curator": self._run_curator,
+            "editorial": self._run_editorial,
             "assembler": self._run_assembler,
             "publisher": self._run_publisher,
         }

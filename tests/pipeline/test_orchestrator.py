@@ -30,12 +30,13 @@ def test_from_flag_skips_earlier_agents(topic_dir):
     orch._run_researcher = lambda: called.append("researcher")
     orch._run_scriptwriter = lambda: called.append("scriptwriter")
     orch._run_curator = lambda: called.append("curator")
+    orch._run_editorial = lambda: called.append("editorial")
     orch._run_assembler = lambda: called.append("assembler")
     orch._run_publisher = lambda: called.append("publisher")
 
     orch.run(from_agent="scriptwriter")
     assert "researcher" not in called
-    assert called == ["scriptwriter", "curator", "assembler", "publisher"]
+    assert called == ["scriptwriter", "curator", "editorial", "assembler", "publisher"]
 
 def test_from_flag_missing_input_raises(topic_dir):
     orch = make_orchestrator(topic_dir)
@@ -50,11 +51,12 @@ def test_full_run_calls_all_agents(topic_dir):
     orch._run_researcher = lambda: called.append("researcher")
     orch._run_scriptwriter = lambda: called.append("scriptwriter")
     orch._run_curator = lambda: called.append("curator")
+    orch._run_editorial = lambda: called.append("editorial")
     orch._run_assembler = lambda: called.append("assembler")
     orch._run_publisher = lambda: called.append("publisher")
 
     orch.run(from_agent=None)
-    assert called == ["researcher", "scriptwriter", "curator", "assembler", "publisher"]
+    assert called == ["researcher", "scriptwriter", "curator", "editorial", "assembler", "publisher"]
 
 def test_unknown_channel_raises(tmp_path):
     with pytest.raises(PipelineError, match="Unknown channel"):
