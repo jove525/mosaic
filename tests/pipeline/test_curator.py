@@ -64,28 +64,37 @@ def test_select_music_track_revelation():
     track = select_music_track(dominant_emotion="REVELATION")
     assert "cinematic" in track["genre"].lower()
 
-def test_run_curator_writes_manifest(tmp_path):
+def test_run_curator_writes_raw_candidates(tmp_path):
     topic_dir = tmp_path / "war-financing"
     topic_dir.mkdir()
     (topic_dir / "clips").mkdir()
     (topic_dir / "script.md").write_text(SAMPLE_SCRIPT, encoding="utf-8")
 
     with patch("mosaic.pipeline.curator._generate_narration") as mock_narr, \
+         patch("mosaic.pipeline.curator._generate_search_queries") as mock_queries, \
          patch("mosaic.pipeline.curator._search_internet_archive") as mock_ia, \
+         patch("mosaic.pipeline.curator._search_wikimedia") as mock_wm, \
+         patch("mosaic.pipeline.curator._resolve_ia_download_url") as mock_resolve, \
          patch("mosaic.pipeline.curator._download_clip") as mock_dl, \
-         patch("mosaic.pipeline.curator._call_claude_for_matching") as mock_match, \
          patch("mosaic.pipeline.curator.TasteStore") as MockTaste:
 
         mock_narr.return_value = b"fake_mp3_bytes"
-        mock_ia.return_value = [{"url": "https://archive.org/test.mp4", "duration": 8.0, "source_type": "internet_archive", "license": "public_domain", "license_tier": "SAFE"}]
-        mock_dl.return_value = tmp_path / "clips" / "clip_001.mp4"
-        mock_match.return_value = {"semantic": True, "emotional": True, "narrative": False, "why": "Good match"}
+        mock_queries.return_value = ["WWII war bonds 1943"]
+        mock_ia.return_value = [{"identifier": "test-id", "url": None, "duration": 8.0, "source_type": "internet_archive", "license": "public_domain", "license_tier": "SAFE", "title": "Test"}]
+        mock_wm.return_value = []
+        mock_resolve.return_value = "https://archive.org/download/test-id/test.mp4"
+        dest = topic_dir / "clips" / "raw" / "test.mp4"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x" * 20000)
+        mock_dl.return_value = dest
         MockTaste.return_value = MagicMock(query=MagicMock(return_value=[]))
 
         result = run_curator(topic_dir, {"north_star": "test"})
 
-    manifest_path = topic_dir / "clip_manifest.json"
-    assert manifest_path.exists()
-    manifest = json.loads(manifest_path.read_text())
-    assert len(manifest) == 3
+    raw_candidates_path = topic_dir / "raw_candidates.json"
+    assert raw_candidates_path.exists()
+    raw = json.loads(raw_candidates_path.read_text())
+    assert len(raw) == 3
+    assert "narration_line_ref" in raw[0]
+    assert "candidates" in raw[0]
     assert (topic_dir / "narration.mp3").exists()
