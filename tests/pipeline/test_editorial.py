@@ -83,3 +83,32 @@ def test_watch_candidate_not_useful_on_api_error(tmp_path):
     result = watch_candidate(fake_video, line, frame_dir=tmp_path / "frames")
     # Should return not_useful gracefully, never raise
     assert result["verdict"] == "not_useful"
+
+
+def test_run_editorial_all_gaps(tmp_path):
+    """When no candidates exist for any line, all entries are flagged needs_generated_visual."""
+    import json
+    from mosaic.pipeline.editorial import run_editorial
+
+    # Write raw_candidates.json with no downloaded candidates
+    raw = [
+        {
+            "narration_line_ref": 1,
+            "narration_text": "Test narration.",
+            "emotion": "TENSION",
+            "visual_description": "Some visual.",
+            "candidates": []
+        }
+    ]
+    (tmp_path / "raw_candidates.json").write_text(json.dumps(raw), encoding="utf-8")
+    (tmp_path / "clips").mkdir()
+    (tmp_path / "clips" / "raw").mkdir()
+    (tmp_path / "clips" / "final").mkdir()
+
+    cache_dir = tmp_path / "cache"
+    run_editorial(tmp_path, cache_dir=cache_dir)
+
+    manifest = json.loads((tmp_path / "clip_manifest.json").read_text())
+    assert len(manifest) == 1
+    assert manifest[0]["needs_generated_visual"] is True
+    assert manifest[0]["cuts"] == []

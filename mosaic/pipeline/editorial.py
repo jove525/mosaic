@@ -165,6 +165,136 @@ def watch_candidate(
         return not_useful
 
 
+def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
+    """Run Editorial agent. Reads raw_candidates.json, writes clip_manifest.json."""
+    if cache_dir is None:
+        _base = Path(__file__).parent.parent.parent
+        cache_dir = _base / "data" / "clip_cache"
+    cache = ClipCache(cache_dir)
+
+    raw_path = topic_dir / "raw_candidates.json"
+    raw_candidates = json.loads(raw_path.read_text(encoding="utf-8"))
+
+    final_dir = topic_dir / "clips" / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    frame_base = topic_dir / "clips" / "frames"
+    frame_base.mkdir(parents=True, exist_ok=True)
+
+    manifest = []
+    sourced = 0
+    gaps = 0
+
+    for line_entry in raw_candidates:
+        line_ref = line_entry["narration_line_ref"]
+        line = {
+            "narration_text": line_entry["narration_text"],
+            "emotion": line_entry.get("emotion", ""),
+            "visual_description": line_entry.get("visual_description", ""),
+        }
+        candidates = line_entry.get("candidates", [])
+        cuts = []
+
+        for candidate in candidates:
+            identifier = candidate.get("identifier", "unknown")
+            local_path = topic_dir / candidate["local_path"]
+
+            if not local_path.exists():
+                logger.warning("Editorial: candidate file missing — %s", local_path)
+                continue
+
+            # Check cache first
+            if cache.exists(identifier):
+                cached = cache.load(identifier)
+                logger.info("Editorial: cache hit for %s", identifier)
+                analysis = {
+                    "verdict": "useful" if cached.segments else "not_useful",
+                    "usable_segments": [
+                        {"start": s.start, "end": s.end,
+                         "description": s.description, "relevance": "cached"}
+                        for s in cached.segments
+                    ],
+                    "why": "from cache",
+                }
+            else:
+                logger.info("Editorial: watching %s for line %d", identifier, line_ref)
+                frame_dir = frame_base / re.sub(r"[^\w\-]", "_", identifier)[:40]
+                analysis = watch_candidate(local_path, line, frame_dir)
+
+                # Cache the result regardless of verdict
+                cached_video = CachedVideo(
+                    identifier=identifier,
+                    source=candidate.get("source", "unknown"),
+                    title=candidate.get("title", ""),
+                    source_url=candidate.get("url", ""),
+                    license=candidate.get("license", "public_domain"),
+                    analyzed_at=date.today().isoformat(),
+                    duration_seconds=0.0,
+                    segments=[
+                        CachedSegment(
+                            start=s["start"], end=s["end"],
+                            description=s["description"],
+                            tags=[line.get("emotion", ""), "auto-tagged"],
+                        )
+                        for s in analysis.get("usable_segments", [])
+                    ],
+                )
+                cache.save(cached_video)
+
+            if analysis["verdict"] != "useful":
+                logger.info("Editorial: %s — not useful for line %d (%s)",
+                            identifier, line_ref, analysis.get("why", ""))
+                continue
+
+            # Trim each usable segment
+            for i, seg in enumerate(analysis["usable_segments"]):
+                cut_name = f"clip_{line_ref:03d}_{chr(97 + i)}.mp4"  # clip_001_a.mp4
+                cut_path = final_dir / cut_name
+                trimmed = trim_segment(local_path, cut_path, seg["start"], seg["end"])
+                if trimmed:
+                    cuts.append({
+                        "local_path": f"clips/final/{cut_name}",
+                        "duration_seconds": round(seg["end"] - seg["start"], 2),
+                        "description": seg["description"],
+                    })
+
+            if cuts:
+                logger.info("Editorial: line %d — %d cuts from %s", line_ref, len(cuts), identifier)
+                break  # found usable cuts from this candidate, move to next line
+
+        if cuts:
+            sourced += 1
+            manifest.append({
+                "narration_line_ref": line_ref,
+                "narration_text": line_entry["narration_text"],
+                "cuts": cuts,
+                "source_url": candidates[0].get("url", "") if candidates else "",
+                "license": candidates[0].get("license", "public_domain") if candidates else "",
+                "needs_generated_visual": False,
+            })
+        else:
+            gaps += 1
+            logger.info("Editorial: line %d — no usable footage found, flagging", line_ref)
+            manifest.append({
+                "narration_line_ref": line_ref,
+                "narration_text": line_entry["narration_text"],
+                "cuts": [],
+                "source_url": None,
+                "license": None,
+                "needs_generated_visual": True,
+                "visual_description": line_entry.get("visual_description", ""),
+            })
+
+    manifest_path = topic_dir / "clip_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    logger.info("Editorial: %d/%d lines sourced, %d flagged", sourced, len(raw_candidates), gaps)
+
+    return {
+        "sourced": sourced,
+        "gaps": gaps,
+        "total": len(raw_candidates),
+    }
+
+
 def trim_segment(source: Path, dest: Path, start: float, end: float) -> Optional[Path]:
     """Trim a segment from source video using ffmpeg. Returns dest path or None on failure."""
     duration = end - start
