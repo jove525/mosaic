@@ -88,6 +88,83 @@ def parse_claude_segments(response_text: str) -> dict:
     return {"verdict": "not_useful", "usable_segments": [], "why": "parse error"}
 
 
+def watch_candidate(
+    video_path: Path,
+    line: dict,
+    frame_dir: Path,
+) -> dict:
+    """Extract frames + transcribe + ask Claude Haiku to find usable segments.
+
+    Returns parsed segment dict. Never raises — returns not_useful on any error.
+    """
+    not_useful = {"verdict": "not_useful", "usable_segments": [], "why": ""}
+
+    # Extract frames
+    try:
+        frame_set = extract_frames(video_path, frame_dir, interval_seconds=4)
+        frame_paths = frame_set.frame_paths[:40]  # cap at 40 frames (~2.7 min coverage)
+    except Exception as e:
+        logger.warning("Frame extraction failed for %s: %s", video_path.name, e)
+        return not_useful
+
+    # Transcribe audio
+    transcript_text = ""
+    try:
+        segments = transcribe_video(video_path)
+        transcript_text = "\n".join(
+            f"[{s.start:.1f}s-{s.end:.1f}s] {s.text}" for s in segments[:60]
+        )
+    except Exception as e:
+        logger.warning("Whisper transcription failed for %s: %s", video_path.name, e)
+        # Continue with frame-only analysis
+
+    # Get video duration via ffprobe
+    video_duration = 0.0
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(video_path)],
+            capture_output=True, text=True, check=True,
+        )
+        video_duration = float(json.loads(result.stdout).get("format", {}).get("duration", 0))
+    except Exception:
+        pass
+
+    # Build Claude message content with frames
+    content = []
+    for frame_path in frame_paths:
+        try:
+            img_data = base64.standard_b64encode(frame_path.read_bytes()).decode("utf-8")
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": img_data},
+            })
+        except Exception:
+            continue
+
+    prompt = build_watch_prompt(
+        narration_text=line["narration_text"],
+        emotion=line.get("emotion", ""),
+        visual_description=line.get("visual_description", ""),
+        transcript_text=transcript_text,
+        video_duration=video_duration,
+    )
+    content.append({"type": "text", "text": prompt})
+
+    # Call Claude Haiku
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            system=_WATCH_SYSTEM,
+            messages=[{"role": "user", "content": content}],
+        )
+        return parse_claude_segments(response.content[0].text)
+    except Exception as e:
+        logger.warning("Claude Haiku call failed for %s: %s", video_path.name, e)
+        return not_useful
+
+
 def trim_segment(source: Path, dest: Path, start: float, end: float) -> Optional[Path]:
     """Trim a segment from source video using ffmpeg. Returns dest path or None on failure."""
     duration = end - start

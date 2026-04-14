@@ -67,3 +67,19 @@ def test_trim_segment_calls_ffmpeg(tmp_path):
         cmd = mock_run.call_args[0][0]
         assert "-ss" in cmd
         assert "10.5" in cmd
+
+
+def test_watch_candidate_not_useful_on_api_error(tmp_path):
+    """watch_candidate returns not_useful verdict when Claude call fails."""
+    from mosaic.pipeline.editorial import watch_candidate
+    # Create a minimal fake video file (ffmpeg will fail, extractor will fail gracefully)
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"not a real video")
+    line = {
+        "narration_text": "Test narration.",
+        "emotion": "TENSION",
+        "visual_description": "Test visual.",
+    }
+    result = watch_candidate(fake_video, line, frame_dir=tmp_path / "frames")
+    # Should return not_useful gracefully, never raise
+    assert result["verdict"] == "not_useful"
