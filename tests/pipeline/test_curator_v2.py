@@ -32,3 +32,10 @@ def test_raw_candidates_json_structure(tmp_path):
     assert "candidates" in entry
     assert entry["candidates"][0]["local_path"].startswith("clips/raw/")
     assert "identifier" in entry["candidates"][0]
+    # Check all six required candidate fields
+    cand = entry["candidates"][0]
+    assert isinstance(entry["narration_line_ref"], int)
+    assert "source" in cand
+    assert "url" in cand
+    assert "title" in cand
+    assert "license" in cand

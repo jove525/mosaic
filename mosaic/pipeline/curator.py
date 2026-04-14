@@ -2,7 +2,7 @@
 
 Reads script.md, finds SAFE-licensed clips per narration line,
 generates narration.mp3 via ElevenLabs, selects music.mp3.
-Writes clip_manifest.json.
+Writes raw_candidates.json, narration.mp3, music.mp3.
 """
 import json
 import logging
