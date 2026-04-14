@@ -311,6 +311,8 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
     script_path = topic_dir / "script.md"
     script_text = script_path.read_text(encoding="utf-8")
     narration_lines = parse_narration_lines(script_text)
+    if not narration_lines:
+        raise ValueError(f"No narration lines parsed from script at {script_path} — check script format")
     clips_dir = topic_dir / "clips" / "raw"
     clips_dir.mkdir(parents=True, exist_ok=True)
     (topic_dir / "clips" / "final").mkdir(parents=True, exist_ok=True)
@@ -363,7 +365,7 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
             if identifier in seen_identifiers:
                 continue
             seen_identifiers.add(identifier)
-            safe_name = re.sub(r"[^\w\-]", "_", identifier)[:80]
+            safe_name = re.sub(r"[^\w\-]", "_", identifier)[:72] + f"_{hash(identifier) & 0xFFFF:04x}"
             dest = clips_dir / f"{safe_name}.mp4"
             if dest.exists() and dest.stat().st_size > 10_000:
                 logger.info("Curator: %s already cached", safe_name)
@@ -379,6 +381,9 @@ def run_curator(topic_dir: Path, channel_profile: dict) -> dict:
                 "title": candidate.get("title", ""),
                 "license": candidate.get("license", "public_domain"),
             })
+
+        if not downloaded_candidates:
+            logger.warning("Curator: line %d — no candidates downloaded", line_ref)
 
         raw_candidates.append({
             "narration_line_ref": line_ref,
