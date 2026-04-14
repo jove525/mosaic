@@ -247,10 +247,13 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
                 continue
 
             # Trim each usable segment
+            source_type = candidate.get("source", candidate.get("source_type", "unknown"))
+            do_crop = _needs_timecode_crop(source_type)
             for i, seg in enumerate(analysis["usable_segments"]):
                 cut_name = f"clip_{line_ref:03d}_{chr(97 + i)}.mp4"  # clip_001_a.mp4
                 cut_path = final_dir / cut_name
-                trimmed = trim_segment(local_path, cut_path, seg["start"], seg["end"])
+                trimmed = trim_segment(local_path, cut_path, seg["start"], seg["end"],
+                                       crop_timecode=do_crop)
                 if trimmed:
                     cuts.append({
                         "local_path": f"clips/final/{cut_name}",
@@ -288,23 +291,92 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
 
     manifest_path = topic_dir / "clip_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    logger.info("Editorial: %d/%d lines sourced, %d flagged", sourced, len(raw_candidates), gaps)
 
+    total = len(raw_candidates)
+    coverage = sourced / total if total else 0.0
+    logger.info("Editorial: %d/%d lines sourced (%.0f%%), %d flagged",
+                sourced, total, coverage * 100, gaps)
+
+    # Write gap report for all flagged lines
+    flagged_entries = [e for e in manifest if e.get("needs_generated_visual")]
+    if flagged_entries:
+        report_lines = [
+            "# Editorial Gap Report\n",
+            f"Coverage: {sourced}/{total} lines ({coverage * 100:.0f}%)\n",
+            f"Minimum required: {settings.min_clip_coverage * 100:.0f}%\n\n",
+            "## Lines Needing Footage\n\n",
+        ]
+        for entry in flagged_entries:
+            action = _infer_action(entry.get("visual_description", ""))
+            report_lines.append(
+                f"### Line {entry['narration_line_ref']} — `{action}`\n"
+                f"**Narration:** {entry['narration_text']}\n"
+                f"**Visual:** {entry.get('visual_description', '(none)')}\n\n"
+            )
+        gap_report_path = topic_dir / "gap_report.md"
+        gap_report_path.write_text("".join(report_lines), encoding="utf-8")
+        logger.info("Editorial: gap_report.md written (%d flagged lines)", len(flagged_entries))
+
+    # Coverage gate — block Assembler if below threshold
+    if coverage < settings.min_clip_coverage:
+        raise ValueError(
+            f"Editorial: coverage too low ({sourced}/{total} = {coverage * 100:.0f}%) — "
+            f"minimum is {settings.min_clip_coverage * 100:.0f}%. "
+            f"Review gap_report.md at {topic_dir / 'gap_report.md'} and source missing footage."
+        )
+
+    cuts_total = sum(len(e["cuts"]) for e in manifest)
+    cache_hits = sum(1 for e in raw_candidates
+                     for c in e.get("candidates", [])
+                     if cache.exists(c.get("identifier", "")))
     return {
-        "sourced": sourced,
-        "gaps": gaps,
-        "total": len(raw_candidates),
+        "lines_resolved": sourced,
+        "lines_flagged": gaps,
+        "cuts_total": cuts_total,
+        "cache_hits": cache_hits,
     }
 
 
-def trim_segment(source: Path, dest: Path, start: float, end: float) -> Optional[Path]:
-    """Trim a segment from source video using ffmpeg. Returns dest path or None on failure."""
+_IA_SOURCES = {"internet_archive", "prelinger"}
+
+_GENERATED_VISUAL_KEYWORDS = [
+    "bar chart", "chart", "graph", "infographic", "diagram", "illustration",
+    "animated", "text overlay", "data visualization", "title card", "black screen",
+    "cta", "subscribe", "typewriter",
+]
+
+
+def _needs_timecode_crop(source_type: str) -> bool:
+    """Return True if the clip source typically has a burned-in timecode overlay."""
+    return source_type in _IA_SOURCES
+
+
+def _infer_action(visual_description: str) -> str:
+    """Classify a flagged line as manual_source or generated_visual based on visual tag."""
+    desc = visual_description.lower()
+    if any(kw in desc for kw in _GENERATED_VISUAL_KEYWORDS):
+        return "generated_visual"
+    return "manual_source"
+
+
+def trim_segment(source: Path, dest: Path, start: float, end: float,
+                 crop_timecode: bool = False) -> Optional[Path]:
+    """Trim a segment from source video using ffmpeg. Returns dest path or None on failure.
+
+    crop_timecode: if True, crops bottom 12% of frame (removes IA window-burn timecodes)
+    and scales back to original dimensions.
+    """
     duration = end - start
+    vf = "crop=iw:ih*0.88:0:0,scale=iw:ih/0.88" if crop_timecode else None
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start),
         "-i", str(source),
         "-t", str(duration),
+    ]
+    if vf:
+        cmd += ["-vf", vf]
+    cmd += [
         "-c:v", "libx264", "-c:a", "aac",
         "-avoid_negative_ts", "make_zero",
         str(dest),

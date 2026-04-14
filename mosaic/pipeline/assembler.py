@@ -248,7 +248,7 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
 
     if music_path.exists() and music_path.stat().st_size > 0:
         audio_filter = (
-            "[0:a]volume=1.0[narr];"
+            "[0:a]loudnorm=I=-14:TP=-1:LRA=11[narr];"
             "[1:a]volume=0.126[music];"
             "[narr][music]amix=inputs=2:duration=first[aout]"
         )
@@ -268,7 +268,8 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
             "ffmpeg", "-y",
             "-i", str(visual_path),
             "-i", str(narration_path),
-            "-map", "0:v", "-map", "1:a",
+            "-filter_complex", "[1:a]loudnorm=I=-14:TP=-1:LRA=11[aout]",
+            "-map", "0:v", "-map", "[aout]",
             "-vf", f"ass={ass_path_str}",
             "-c:v", "libx264", "-c:a", "aac", "-shortest",
             str(output_path),

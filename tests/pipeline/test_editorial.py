@@ -106,10 +106,13 @@ def test_run_editorial_all_gaps(tmp_path):
     (tmp_path / "clips" / "final").mkdir()
 
     cache_dir = tmp_path / "cache"
-    result = run_editorial(tmp_path, cache_dir=cache_dir)
-    assert result == {"sourced": 0, "gaps": 1, "total": 1}
+    # Coverage gate raises ValueError when below threshold (0/1 = 0%)
+    with pytest.raises(ValueError, match="coverage too low"):
+        run_editorial(tmp_path, cache_dir=cache_dir)
 
+    # Manifest and gap report are still written before the gate fires
     manifest = json.loads((tmp_path / "clip_manifest.json").read_text())
     assert len(manifest) == 1
     assert manifest[0]["needs_generated_visual"] is True
     assert manifest[0]["cuts"] == []
+    assert (tmp_path / "gap_report.md").exists()

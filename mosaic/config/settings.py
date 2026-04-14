@@ -14,6 +14,7 @@ class Settings:
         self.elevenlabs_voice_id: str = os.getenv("ELEVENLABS_VOICE_ID", "")
         self.whisper_model: str = os.getenv("WHISPER_MODEL", "base")
         self.frame_interval_seconds: int = int(os.getenv("FRAME_INTERVAL_SECONDS", "8"))
+        self.min_clip_coverage: float = float(os.getenv("MIN_CLIP_COVERAGE", "0.70"))
 
         self.data_dir: Path = _BASE / "data"
         self.kb_dir: Path = self.data_dir / "kb"
