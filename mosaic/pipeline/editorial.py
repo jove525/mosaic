@@ -193,6 +193,7 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
         }
         candidates = line_entry.get("candidates", [])
         cuts = []
+        winning_candidate = None
 
         for candidate in candidates:
             identifier = candidate.get("identifier", "unknown")
@@ -258,6 +259,7 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
                     })
 
             if cuts:
+                winning_candidate = candidate
                 logger.info("Editorial: line %d — %d cuts from %s", line_ref, len(cuts), identifier)
                 break  # found usable cuts from this candidate, move to next line
 
@@ -267,8 +269,8 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
                 "narration_line_ref": line_ref,
                 "narration_text": line_entry["narration_text"],
                 "cuts": cuts,
-                "source_url": candidates[0].get("url", "") if candidates else "",
-                "license": candidates[0].get("license", "public_domain") if candidates else "",
+                "source_url": winning_candidate.get("url", "") if winning_candidate else "",
+                "license": winning_candidate.get("license", "public_domain") if winning_candidate else "public_domain",
                 "needs_generated_visual": False,
             })
         else:
