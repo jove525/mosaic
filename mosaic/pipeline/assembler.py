@@ -170,13 +170,106 @@ def _collect_valid_cuts(manifest: list[dict], topic_dir: Path) -> list[dict]:
     return valid
 
 
+def _find_narration_timestamp(narration_text: str, whisper_segments: list[dict]) -> float:
+    """Find the start time of a narration line by fuzzy-matching against Whisper segments.
+
+    Matches the first Whisper segment whose text shares the most leading words with
+    the narration line. Returns 0.0 if no match found.
+    """
+    target_words = narration_text.lower().split()[:6]  # first 6 words
+    best_start = None
+    best_score = 0
+    for seg in whisper_segments:
+        seg_words = seg.get("text", "").lower().split()
+        score = sum(1 for w in target_words if w in seg_words)
+        if score > best_score:
+            best_score = score
+            best_start = seg.get("start", 0.0)
+    return best_start if best_start is not None else 0.0
+
+
+def _make_black_segment(topic_dir: Path, duration: float, tag: str) -> Path:
+    """Generate a black video segment of the given duration. Returns path to the file."""
+    black_path = topic_dir / f"_black_{tag}.mp4"
+    if black_path.exists() and black_path.stat().st_size > 1000:
+        return black_path
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", f"color=c=black:size=1920x1080:duration={duration:.3f}:rate=25",
+        "-c:v", "libx264", "-an", str(black_path),
+    ], check=True, capture_output=True)
+    return black_path
+
+
+def _build_timeline(manifest: list[dict], topic_dir: Path,
+                    whisper_segments: list[dict], total_duration: float) -> list[Path]:
+    """Build an ordered list of clip paths that form the full narration timeline.
+
+    For each manifest entry:
+    - Find when that narration line starts (via Whisper timestamp matching)
+    - Concatenate the entry's cuts at that position
+    - Fill the gap before the next entry (or end of video) with black frames
+
+    Returns a list of Path objects in playback order.
+    """
+    # Build (narration_start_sec, entry) pairs for resolved entries only
+    timed: list[tuple[float, dict]] = []
+    for entry in manifest:
+        if entry.get("needs_generated_visual") or not entry.get("cuts"):
+            continue
+        cuts = [c for c in entry["cuts"]
+                if (topic_dir / c["local_path"]).exists()
+                and (topic_dir / c["local_path"]).stat().st_size > 1000]
+        if not cuts:
+            continue
+        t = _find_narration_timestamp(entry["narration_text"], whisper_segments)
+        timed.append((t, entry, cuts))  # type: ignore[misc]
+
+    timed.sort(key=lambda x: x[0])
+
+    segments_out: list[Path] = []
+    cursor = 0.0  # current position in output timeline
+
+    for start_sec, entry, cuts in timed:
+        # Fill gap before this entry with black
+        gap = start_sec - cursor
+        if gap > 0.1:
+            tag = f"pre_{int(start_sec * 10):06d}"
+            try:
+                black = _make_black_segment(topic_dir, gap, tag)
+                segments_out.append(black)
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else ""
+                logger.warning("Black frame generation failed (gap %.1fs): %s", gap, stderr)
+            cursor = start_sec
+
+        # Add all cuts for this entry in order
+        cuts_duration = 0.0
+        for cut in cuts:
+            cut_path = topic_dir / cut["local_path"]
+            segments_out.append(cut_path)
+            cuts_duration += cut.get("duration_seconds", 0.0)
+        cursor += cuts_duration
+
+    # Pad end with black to reach total_duration
+    remaining = total_duration - cursor
+    if remaining > 0.1:
+        try:
+            black = _make_black_segment(topic_dir, remaining, "end")
+            segments_out.append(black)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else ""
+            logger.warning("Black frame generation failed (tail %.1fs): %s", remaining, stderr)
+
+    return segments_out
+
+
 def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
                   clip_manifest: list[dict], ass_path: Path,
                   whisper_result: dict) -> Path:
     """Render final_draft.mp4 via ffmpeg. Audio is master timeline."""
     import shutil
     output_path = topic_dir / "final_draft.mp4"
-    clips_dir = topic_dir / "clips"
     # ffmpeg ass filter cannot handle Windows absolute paths with drive letters.
     # Copy subtitles.ass into the topic_dir and reference it with a relative path
     # by running ffmpeg with cwd=topic_dir.
@@ -194,45 +287,17 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
     else:
         total_duration = 60.0
 
-    valid_clips = _collect_valid_cuts(clip_manifest, topic_dir)
+    # Build timeline: clips at narration timestamps, black frames elsewhere
+    timeline_paths = _build_timeline(clip_manifest, topic_dir, segments, total_duration)
 
-    if not valid_clips:
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=black:size=1920x1080:duration={total_duration}",
-            "-i", str(narration_path),
-            "-vf", f"ass={ass_path_str}",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
-            str(output_path),
-        ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, cwd=str(topic_dir))
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-            logger.error("ffmpeg failed (no-clips branch): %s", stderr)
-            raise
-        return output_path
+    if not timeline_paths:
+        # All gaps — full black
+        timeline_paths = [_make_black_segment(topic_dir, total_duration, "full")]
 
     concat_list_path = topic_dir / "concat_list.txt"
-    with open(concat_list_path, "w") as f:
-        if valid_clips:
-            for cut in valid_clips:
-                cut_path = (topic_dir / cut["local_path"]).absolute()
-                f.write(f"file '{cut_path}'\n")
-        else:
-            black_path = topic_dir / "black_full.mp4"
-            if not black_path.exists():
-                try:
-                    subprocess.run([
-                        "ffmpeg", "-y", "-f", "lavfi",
-                        "-i", f"color=c=black:size=1920x1080:duration={total_duration}",
-                        "-c:v", "libx264", str(black_path),
-                    ], check=True, capture_output=True)
-                except subprocess.CalledProcessError as e:
-                    stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-                    logger.error("ffmpeg failed (black frame generation): %s", stderr)
-                    raise
-            f.write(f"file '{black_path.absolute()}'\n")
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for p in timeline_paths:
+            f.write(f"file '{p.absolute().as_posix()}'\n")
 
     visual_path = topic_dir / "visual_track.mp4"
     try:
