@@ -165,8 +165,86 @@ def watch_candidate(
         return not_useful
 
 
+def _load_manual_sources(topic_dir: Path) -> dict[int, list[dict]]:
+    """Load manual_sources.json if present. Returns dict keyed by narration_line_ref."""
+    manual_path = topic_dir / "manual_sources.json"
+    if not manual_path.exists():
+        return {}
+    try:
+        entries = json.loads(manual_path.read_text(encoding="utf-8"))
+        result: dict[int, list[dict]] = {}
+        for entry in entries:
+            line_ref = entry.get("narration_line_ref")
+            if line_ref is None:
+                continue
+            candidate = {
+                "identifier": entry.get("identifier") or f"manual_{line_ref}",
+                "url": entry["url"],
+                "local_path": None,  # will be downloaded
+                "title": entry.get("title", "Manual source"),
+                "source": entry.get("source", "manual"),
+                "source_type": entry.get("source", "manual"),
+                "license": entry.get("license", "public_domain"),
+            }
+            result.setdefault(line_ref, []).append(candidate)
+        logger.info("Editorial: loaded %d manual source entries from manual_sources.json",
+                    sum(len(v) for v in result.values()))
+        return result
+    except Exception as e:
+        logger.warning("Editorial: failed to load manual_sources.json: %s", e)
+        return {}
+
+
+def _download_manual_candidate(candidate: dict, clips_raw_dir: Path) -> Optional[dict]:
+    """Download a manually specified clip URL into clips/raw/. Returns updated candidate or None."""
+    import requests
+    url = candidate["url"]
+    identifier = candidate["identifier"]
+    safe_name = re.sub(r"[^\w\-]", "_", identifier)[:72] + f"_{hash(identifier) & 0xFFFF:04x}"
+    dest = clips_raw_dir / f"{safe_name}.mp4"
+    if dest.exists() and dest.stat().st_size > 10_000:
+        logger.info("Editorial: manual clip already cached — %s", safe_name)
+    else:
+        import subprocess as _sp
+        try:
+            result = _sp.run(
+                ["yt-dlp", "-o", str(dest), "--no-playlist", url],
+                capture_output=True, timeout=120,
+            )
+            if result.returncode != 0 or not dest.exists():
+                raise RuntimeError("yt-dlp failed")
+        except Exception:
+            try:
+                resp = requests.get(url, timeout=120, stream=True)
+                resp.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            except Exception as e:
+                logger.warning("Editorial: failed to download manual clip %s: %s", url, e)
+                return None
+    if not dest.exists() or dest.stat().st_size < 10_000:
+        return None
+    return {**candidate, "local_path": f"clips/raw/{dest.name}"}
+
+
+def _build_search_urls(visual_description: str) -> list[str]:
+    """Generate suggested search URLs for a flagged line based on its visual description."""
+    words = re.sub(r"[^\w\s]", "", visual_description).split()[:6]
+    query = "+".join(words)
+    return [
+        f"https://archive.org/search?query={query}&and[]=mediatype%3A%22movies%22",
+        f"https://archive.org/search?query=collection%3Aprelinger+{query}",
+        f"https://commons.wikimedia.org/w/index.php?search={query}&ns6=1",
+    ]
+
+
 def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
-    """Run Editorial agent. Reads raw_candidates.json, writes clip_manifest.json."""
+    """Run Editorial agent. Reads raw_candidates.json, writes clip_manifest.json.
+
+    Also reads manual_sources.json (if present) — manually specified clip URLs are
+    prepended to each line's candidate list and tried before automated candidates.
+    """
     if cache_dir is None:
         _base = Path(__file__).parent.parent.parent
         cache_dir = _base / "data" / "clip_cache"
@@ -174,6 +252,25 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
 
     raw_path = topic_dir / "raw_candidates.json"
     raw_candidates = json.loads(raw_path.read_text(encoding="utf-8"))
+
+    # Load manual overrides — keyed by narration_line_ref
+    manual_by_line = _load_manual_sources(topic_dir)
+    clips_raw_dir = topic_dir / "clips" / "raw"
+    clips_raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download any manual candidates that haven't been fetched yet
+    for line_ref, candidates in manual_by_line.items():
+        resolved = []
+        for c in candidates:
+            if c.get("local_path") is None:
+                downloaded = _download_manual_candidate(c, clips_raw_dir)
+                if downloaded:
+                    resolved.append(downloaded)
+                    logger.info("Editorial: manual clip downloaded for line %d — %s",
+                                line_ref, downloaded["local_path"])
+            else:
+                resolved.append(c)
+        manual_by_line[line_ref] = resolved
 
     final_dir = topic_dir / "clips" / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
@@ -191,7 +288,9 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
             "emotion": line_entry.get("emotion", ""),
             "visual_description": line_entry.get("visual_description", ""),
         }
-        candidates = line_entry.get("candidates", [])
+        # Manual candidates go first — tried before any automated candidates
+        manual_candidates = manual_by_line.get(line_ref, [])
+        candidates = manual_candidates + line_entry.get("candidates", [])
         cuts = []
         winning_candidate = None
 
@@ -299,21 +398,40 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
 
     # Write gap report for all flagged lines
     flagged_entries = [e for e in manifest if e.get("needs_generated_visual")]
+    gap_report_path = topic_dir / "gap_report.md"
     if flagged_entries:
         report_lines = [
-            "# Editorial Gap Report\n",
-            f"Coverage: {sourced}/{total} lines ({coverage * 100:.0f}%)\n",
-            f"Minimum required: {settings.min_clip_coverage * 100:.0f}%\n\n",
-            "## Lines Needing Footage\n\n",
+            "# Editorial Gap Report\n\n",
+            f"**Coverage:** {sourced}/{total} lines ({coverage * 100:.0f}%)"
+            f" — minimum required: {settings.min_clip_coverage * 100:.0f}%\n\n",
+            "## How to resolve\n\n",
+            "1. Find a clip for each `manual_source` line below\n",
+            "2. Add it to `manual_sources.json` in this topic directory:\n\n",
+            "```json\n",
+            "[\n",
+            '  {"narration_line_ref": N, "url": "https://...", "title": "...",\n',
+            '   "source": "internet_archive", "license": "public_domain"}\n',
+            "]\n",
+            "```\n\n",
+            "3. Re-run: `python run_pipeline.py --channel incentiveslab"
+            f" --topic {topic_dir.name} --from editorial`\n\n",
+            "---\n\n",
+            "## Flagged Lines\n\n",
         ]
         for entry in flagged_entries:
-            action = _infer_action(entry.get("visual_description", ""))
+            visual = entry.get("visual_description", "")
+            action = _infer_action(visual)
+            search_urls = _build_search_urls(visual) if action == "manual_source" else []
             report_lines.append(
                 f"### Line {entry['narration_line_ref']} — `{action}`\n"
                 f"**Narration:** {entry['narration_text']}\n"
-                f"**Visual:** {entry.get('visual_description', '(none)')}\n\n"
+                f"**Visual:** {visual or '(none)'}\n"
             )
-        gap_report_path = topic_dir / "gap_report.md"
+            if search_urls:
+                report_lines.append("**Suggested searches:**\n")
+                for url in search_urls:
+                    report_lines.append(f"- {url}\n")
+            report_lines.append("\n")
         gap_report_path.write_text("".join(report_lines), encoding="utf-8")
         logger.info("Editorial: gap_report.md written (%d flagged lines)", len(flagged_entries))
 
@@ -321,8 +439,10 @@ def run_editorial(topic_dir: Path, cache_dir: Optional[Path] = None) -> dict:
     if coverage < settings.min_clip_coverage:
         raise ValueError(
             f"Editorial: coverage too low ({sourced}/{total} = {coverage * 100:.0f}%) — "
-            f"minimum is {settings.min_clip_coverage * 100:.0f}%. "
-            f"Review gap_report.md at {topic_dir / 'gap_report.md'} and source missing footage."
+            f"minimum is {settings.min_clip_coverage * 100:.0f}%.\n"
+            f"  1. Review: {gap_report_path}\n"
+            f"  2. Add clips: {topic_dir / 'manual_sources.json'}\n"
+            f"  3. Re-run: python run_pipeline.py --from editorial"
         )
 
     cuts_total = sum(len(e["cuts"]) for e in manifest)

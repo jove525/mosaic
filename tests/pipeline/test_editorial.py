@@ -6,6 +6,8 @@ from mosaic.pipeline.editorial import (
     parse_claude_segments,
     build_watch_prompt,
     trim_segment,
+    _load_manual_sources,
+    _build_search_urls,
 )
 
 
@@ -116,3 +118,40 @@ def test_run_editorial_all_gaps(tmp_path):
     assert manifest[0]["needs_generated_visual"] is True
     assert manifest[0]["cuts"] == []
     assert (tmp_path / "gap_report.md").exists()
+
+    # Gap report contains manual_sources.json instructions and search links
+    report_text = (tmp_path / "gap_report.md").read_text()
+    assert "manual_sources.json" in report_text
+    assert "Suggested searches" in report_text
+
+
+def test_load_manual_sources_missing(tmp_path):
+    """Returns empty dict when manual_sources.json does not exist."""
+    result = _load_manual_sources(tmp_path)
+    assert result == {}
+
+
+def test_load_manual_sources_valid(tmp_path):
+    """Loads and groups manual sources by narration_line_ref."""
+    sources = [
+        {"narration_line_ref": 3, "url": "https://archive.org/download/x/x.mp4",
+         "title": "Test clip", "source": "internet_archive", "license": "public_domain"},
+        {"narration_line_ref": 7, "url": "https://archive.org/download/y/y.mp4",
+         "title": "Another clip", "source": "prelinger", "license": "public_domain"},
+    ]
+    (tmp_path / "manual_sources.json").write_text(json.dumps(sources), encoding="utf-8")
+    result = _load_manual_sources(tmp_path)
+    assert 3 in result
+    assert 7 in result
+    assert result[3][0]["url"] == "https://archive.org/download/x/x.mp4"
+    assert result[3][0]["source"] == "internet_archive"
+    assert result[7][0]["identifier"] == "manual_7"
+
+
+def test_build_search_urls_returns_three_links():
+    """Returns three search URLs for a given visual description."""
+    urls = _build_search_urls("WWII war bond drive civilians at booth")
+    assert len(urls) == 3
+    assert any("archive.org" in u for u in urls)
+    assert any("prelinger" in u for u in urls)
+    assert any("commons.wikimedia.org" in u for u in urls)
