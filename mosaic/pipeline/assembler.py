@@ -140,7 +140,7 @@ def _run_self_eval(script_text: str, manifest: list[dict]) -> dict:
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     checks = build_self_eval_checks()
     checks_text = "\n".join(f"{i+1}. {c['question']}" for i, c in enumerate(checks))
-    gaps = [m for m in manifest if m.get("license_tier") == "GAP"]
+    gaps = [m for m in manifest if m.get("needs_generated_visual")]
     gap_note = f"\n\nNote: {len(gaps)} narration lines have no clip (black frame placeholder)." if gaps else ""
 
     user = (
@@ -155,6 +155,19 @@ def _run_self_eval(script_text: str, manifest: list[dict]) -> dict:
         messages=[{"role": "user", "content": user}],
     )
     return parse_eval_result(response.content[0].text)
+
+
+def _collect_valid_cuts(manifest: list[dict], topic_dir: Path) -> list[dict]:
+    """Flatten cuts from new manifest format. Skips missing files and gap entries."""
+    valid = []
+    for entry in manifest:
+        if entry.get("needs_generated_visual"):
+            continue
+        for cut in entry.get("cuts", []):
+            cut_path = topic_dir / cut["local_path"]
+            if cut_path.exists() and cut_path.stat().st_size > 1000:
+                valid.append(cut)
+    return valid
 
 
 def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
@@ -181,10 +194,7 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
     else:
         total_duration = 60.0
 
-    valid_clips = [
-        m for m in clip_manifest
-        if m.get("local_path") and (topic_dir / m["local_path"]).exists()
-    ]
+    valid_clips = _collect_valid_cuts(clip_manifest, topic_dir)
 
     if not valid_clips:
         cmd = [
@@ -205,24 +215,24 @@ def _render_video(topic_dir: Path, narration_path: Path, music_path: Path,
 
     concat_list_path = topic_dir / "concat_list.txt"
     with open(concat_list_path, "w") as f:
-        for entry in clip_manifest:
-            local = entry.get("local_path")
-            if local and (topic_dir / local).exists():
-                f.write(f"file '{(topic_dir / local).absolute()}'\n")
-            else:
-                black_path = topic_dir / "black_3s.mp4"
-                if not black_path.exists():
-                    try:
-                        subprocess.run([
-                            "ffmpeg", "-y", "-f", "lavfi",
-                            "-i", "color=c=black:size=1920x1080:duration=3",
-                            "-c:v", "libx264", str(black_path),
-                        ], check=True, capture_output=True)
-                    except subprocess.CalledProcessError as e:
-                        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-                        logger.error("ffmpeg failed (black frame generation): %s", stderr)
-                        raise
-                f.write(f"file '{black_path.absolute()}'\n")
+        if valid_clips:
+            for cut in valid_clips:
+                cut_path = (topic_dir / cut["local_path"]).absolute()
+                f.write(f"file '{cut_path}'\n")
+        else:
+            black_path = topic_dir / "black_full.mp4"
+            if not black_path.exists():
+                try:
+                    subprocess.run([
+                        "ffmpeg", "-y", "-f", "lavfi",
+                        "-i", f"color=c=black:size=1920x1080:duration={total_duration}",
+                        "-c:v", "libx264", str(black_path),
+                    ], check=True, capture_output=True)
+                except subprocess.CalledProcessError as e:
+                    stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+                    logger.error("ffmpeg failed (black frame generation): %s", stderr)
+                    raise
+            f.write(f"file '{black_path.absolute()}'\n")
 
     visual_path = topic_dir / "visual_track.mp4"
     try:
@@ -321,7 +331,7 @@ def run_assembler(
 
     logger.info("Assembler: running self-evaluation")
     eval_result = _run_self_eval(script_text, manifest)
-    gaps = [m for m in manifest if m.get("license_tier") == "GAP"]
+    gaps = [m for m in manifest if m.get("needs_generated_visual")]
 
     logger.info("Assembler: rendering final_draft.mp4")
     output_path = _render_video(
