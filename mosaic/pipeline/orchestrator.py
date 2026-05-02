@@ -87,7 +87,7 @@ class Orchestrator:
         result = run_publisher(self.topic_dir, self.topic_slug, self._channel_profile)
         self._log("PUBLISHER", f"youtube_metadata.json written — status: {result.get('status', '?')}")
 
-    def run(self, from_agent: str | None = None):
+    def run(self, from_agent: str | None = None, to_agent: str | None = None):
         self._ensure_dirs()
         start_idx = 0
         if from_agent:
@@ -96,7 +96,13 @@ class Orchestrator:
             self._check_required_inputs(from_agent)
             start_idx = AGENT_ORDER.index(from_agent)
 
-        agents_to_run = AGENT_ORDER[start_idx:]
+        end_idx = len(AGENT_ORDER)
+        if to_agent:
+            if to_agent not in AGENT_ORDER:
+                raise PipelineError(f"Unknown --to value: '{to_agent}'. Valid: {AGENT_ORDER}")
+            end_idx = AGENT_ORDER.index(to_agent) + 1
+
+        agents_to_run = AGENT_ORDER[start_idx:end_idx]
         dispatch = {
             "researcher": self._run_researcher,
             "scriptwriter": self._run_scriptwriter,

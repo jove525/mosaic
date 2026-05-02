@@ -14,7 +14,7 @@ class VideoMeta:
     local_path: Path
 
 
-def download_video(url: str, output_dir: Path) -> VideoMeta:
+def download_video(url: str, output_dir: Path, cookies_path: Path | None = None) -> VideoMeta:
     """Download a video by URL. Skip if already downloaded. Return VideoMeta."""
     ensure_dir(output_dir)
 
@@ -23,8 +23,15 @@ def download_video(url: str, output_dir: Path) -> VideoMeta:
         "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "js_runtimes": {"node": {}},
+        "sleep_interval": 3,
+        "max_sleep_interval": 8,
     }
+
+    if cookies_path and cookies_path.exists():
+        ydl_opts["cookiefile"] = str(cookies_path)
+    else:
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)

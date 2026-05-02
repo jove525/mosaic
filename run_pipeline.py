@@ -26,6 +26,13 @@ def main():
         help="Resume pipeline from this agent (skips earlier agents)",
     )
     parser.add_argument(
+        "--to",
+        dest="to_agent",
+        choices=AGENT_ORDER,
+        default=None,
+        help="Stop pipeline after this agent (inclusive)",
+    )
+    parser.add_argument(
         "--delta",
         action="store_true",
         help="Run delta analysis (requires your_feedback.md to exist)",
@@ -50,7 +57,7 @@ def main():
             topic_slug=args.topic,
             output_root=settings.output_dir,
         )
-        orch.run(from_agent=args.from_agent)
+        orch.run(from_agent=args.from_agent, to_agent=args.to_agent)
     except PipelineError as e:
         print(f"\n[ERROR] {e}")
         raise SystemExit(1)

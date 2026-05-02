@@ -112,7 +112,7 @@ def analyze_video(
     data = None
     for attempt in range(2):
         response = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=8096,
             messages=[{"role": "user", "content": content}],
         )
