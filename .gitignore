@@ -4,3 +4,21 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+
+# Generated output
+output/
+seed/
+
+# Auth / credentials
+cookies.txt
+
+# Internal / private
+CLAUDE.md
+ACTIVITY_LOG.md
+docs/superpowers/
+
+# Research data & notes
+intelligence-report.txt
+yt channels-intelligence-data.txt
+2-3 Minute Test Run*.txt
+*.txt
